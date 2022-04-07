@@ -13,32 +13,36 @@ import type Store from 'react-devtools-shared/src/devtools/store';
 describe('editing interface', () => {
   let PropTypes;
   let React;
-  let ReactDOM;
   let bridge: FrontendBridge;
+  let legacyRender;
   let store: Store;
   let utils;
 
   const flushPendingUpdates = () => {
-    jest.runOnlyPendingTimers();
+    utils.act(() => jest.runOnlyPendingTimers());
   };
 
   beforeEach(() => {
     utils = require('./utils');
 
+    legacyRender = utils.legacyRender;
+
     bridge = global.bridge;
     store = global.store;
     store.collapseNodesByDefault = false;
+    store.componentFilters = [];
 
     PropTypes = require('prop-types');
     React = require('react');
-    ReactDOM = require('react-dom');
   });
 
   describe('props', () => {
     let committedClassProps;
     let committedFunctionProps;
+    let inputRef;
     let classID;
     let functionID;
+    let hostComponentID;
 
     async function mountTestApp() {
       class ClassComponent extends React.Component {
@@ -60,9 +64,11 @@ describe('editing interface', () => {
         return null;
       }
 
+      inputRef = React.createRef(null);
+
       const container = document.createElement('div');
       await utils.actAsync(() =>
-        ReactDOM.render(
+        legacyRender(
           <>
             <ClassComponent
               array={[1, 2, 3]}
@@ -76,6 +82,7 @@ describe('editing interface', () => {
               shallow="initial"
             />
             ,
+            <input ref={inputRef} onChange={jest.fn()} value="initial" />
           </>,
           container,
         ),
@@ -83,6 +90,7 @@ describe('editing interface', () => {
 
       classID = ((store.getElementIDAtIndex(0): any): number);
       functionID = ((store.getElementIDAtIndex(1): any): number);
+      hostComponentID = ((store.getElementIDAtIndex(2): any): number);
 
       expect(committedClassProps).toStrictEqual({
         array: [1, 2, 3],
@@ -98,6 +106,7 @@ describe('editing interface', () => {
         },
         shallow: 'initial',
       });
+      expect(inputRef.current.value).toBe('initial');
     }
 
     it('should have editable values', async () => {
@@ -380,6 +389,25 @@ describe('editing interface', () => {
         object: {},
       });
     });
+
+    it('should support editing host component values', async () => {
+      await mountTestApp();
+
+      function overrideProps(id, path, value) {
+        const rendererID = utils.getRendererID();
+        bridge.send('overrideValueAtPath', {
+          id,
+          path,
+          rendererID,
+          type: 'props',
+          value,
+        });
+        flushPendingUpdates();
+      }
+
+      overrideProps(hostComponentID, ['value'], 'updated');
+      expect(inputRef.current.value).toBe('updated');
+    });
   });
 
   describe('state', () => {
@@ -408,7 +436,7 @@ describe('editing interface', () => {
 
       const container = document.createElement('div');
       await utils.actAsync(() =>
-        ReactDOM.render(
+        legacyRender(
           <ClassComponent object={{nested: 'initial'}} shallow="initial" />,
           container,
         ),
@@ -625,7 +653,7 @@ describe('editing interface', () => {
 
       const container = document.createElement('div');
       await utils.actAsync(() =>
-        ReactDOM.render(<FunctionComponent />, container),
+        legacyRender(<FunctionComponent />, container),
       );
 
       hookID = 0; // index
@@ -875,7 +903,7 @@ describe('editing interface', () => {
 
       const container = document.createElement('div');
       await utils.actAsync(() =>
-        ReactDOM.render(
+        legacyRender(
           <LegacyContextProvider>
             <ClassComponent />
           </LegacyContextProvider>,

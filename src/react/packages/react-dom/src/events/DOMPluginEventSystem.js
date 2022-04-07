@@ -21,12 +21,13 @@ import type {
 } from './ReactSyntheticEventType';
 import type {Fiber} from 'react-reconciler/src/ReactInternalTypes';
 
-import {registrationNameDependencies, allNativeEvents} from './EventRegistry';
+import {allNativeEvents} from './EventRegistry';
 import {
   IS_CAPTURE_PHASE,
   IS_EVENT_HANDLE_NON_MANAGED_NODE,
   IS_NON_DELEGATED,
 } from './EventSystemFlags';
+import {isReplayingEvent} from './CurrentReplayingEvent';
 
 import {
   HostRoot,
@@ -43,7 +44,7 @@ import {
   getEventHandlerListeners,
 } from '../client/ReactDOMComponentTree';
 import {COMMENT_NODE} from '../shared/HTMLNodeType';
-import {batchedEventUpdates} from './ReactDOMUpdateBatching';
+import {batchedUpdates} from './ReactDOMUpdateBatching';
 import getListener from './getListener';
 import {passiveBrowserEventsSupported} from './checkPassiveEvents';
 
@@ -51,7 +52,6 @@ import {
   enableLegacyFBSupport,
   enableCreateEventHandleAPI,
   enableScopeAPI,
-  enableEagerRootListeners,
 } from 'shared/ReactFeatureFlags';
 import {
   invokeGuardedCallbackAndCatchFirstError,
@@ -134,7 +134,7 @@ function extractEvents(
   // invalidates the heuristics of the event plugin. We
   // could alter all these plugins to work in such ways, but
   // that might cause other unknown side-effects that we
-  // can't forsee right now.
+  // can't foresee right now.
   if (shouldProcessPolyfillPlugins) {
     EnterLeaveEventPlugin.extractEvents(
       dispatchQueue,
@@ -193,6 +193,7 @@ export const mediaEventTypes: Array<DOMEventName> = [
   'playing',
   'progress',
   'ratechange',
+  'resize',
   'seeked',
   'seeking',
   'stalled',
@@ -296,6 +297,15 @@ export function listenToNonDelegatedEvent(
   domEventName: DOMEventName,
   targetElement: Element,
 ): void {
+  if (__DEV__) {
+    if (!nonDelegatedEvents.has(domEventName)) {
+      console.error(
+        'Did not expect a listenToNonDelegatedEvent() call for "%s". ' +
+          'This is a bug in React. Please file an issue.',
+        domEventName,
+      );
+    }
+  }
   const isCapturePhaseListener = false;
   const listenerSet = getEventListenerSet(targetElement);
   const listenerSetKey = getListenerSetKey(
@@ -313,90 +323,46 @@ export function listenToNonDelegatedEvent(
   }
 }
 
-const listeningMarker =
-  '_reactListening' +
-  Math.random()
-    .toString(36)
-    .slice(2);
-
-export function listenToAllSupportedEvents(rootContainerElement: EventTarget) {
-  if (enableEagerRootListeners) {
-    if ((rootContainerElement: any)[listeningMarker]) {
-      // Performance optimization: don't iterate through events
-      // for the same portal container or root node more than once.
-      // TODO: once we remove the flag, we may be able to also
-      // remove some of the bookkeeping maps used for laziness.
-      return;
-    }
-    (rootContainerElement: any)[listeningMarker] = true;
-    allNativeEvents.forEach(domEventName => {
-      if (!nonDelegatedEvents.has(domEventName)) {
-        listenToNativeEvent(
-          domEventName,
-          false,
-          ((rootContainerElement: any): Element),
-          null,
-        );
-      }
-      listenToNativeEvent(
-        domEventName,
-        true,
-        ((rootContainerElement: any): Element),
-        null,
-      );
-    });
-  }
-}
-
 export function listenToNativeEvent(
   domEventName: DOMEventName,
   isCapturePhaseListener: boolean,
-  rootContainerElement: EventTarget,
-  targetElement: Element | null,
-  eventSystemFlags?: EventSystemFlags = 0,
+  target: EventTarget,
 ): void {
-  let target = rootContainerElement;
-
-  // selectionchange needs to be attached to the document
-  // otherwise it won't capture incoming events that are only
-  // triggered on the document directly.
-  if (
-    domEventName === 'selectionchange' &&
-    (rootContainerElement: any).nodeType !== DOCUMENT_NODE
-  ) {
-    target = (rootContainerElement: any).ownerDocument;
-  }
-  // If the event can be delegated (or is capture phase), we can
-  // register it to the root container. Otherwise, we should
-  // register the event to the target element and mark it as
-  // a non-delegated event.
-  if (
-    targetElement !== null &&
-    !isCapturePhaseListener &&
-    nonDelegatedEvents.has(domEventName)
-  ) {
-    // For all non-delegated events, apart from scroll, we attach
-    // their event listeners to the respective elements that their
-    // events fire on. That means we can skip this step, as event
-    // listener has already been added previously. However, we
-    // special case the scroll event because the reality is that any
-    // element can scroll.
-    // TODO: ideally, we'd eventually apply the same logic to all
-    // events from the nonDelegatedEvents list. Then we can remove
-    // this special case and use the same logic for all events.
-    if (domEventName !== 'scroll') {
-      return;
+  if (__DEV__) {
+    if (nonDelegatedEvents.has(domEventName) && !isCapturePhaseListener) {
+      console.error(
+        'Did not expect a listenToNativeEvent() call for "%s" in the bubble phase. ' +
+          'This is a bug in React. Please file an issue.',
+        domEventName,
+      );
     }
-    eventSystemFlags |= IS_NON_DELEGATED;
-    target = targetElement;
   }
+
+  let eventSystemFlags = 0;
+  if (isCapturePhaseListener) {
+    eventSystemFlags |= IS_CAPTURE_PHASE;
+  }
+  addTrappedEventListener(
+    target,
+    domEventName,
+    eventSystemFlags,
+    isCapturePhaseListener,
+  );
+}
+
+// This is only used by createEventHandle when the
+// target is not a DOM element. E.g. window.
+export function listenToNativeEventForNonManagedEventTarget(
+  domEventName: DOMEventName,
+  isCapturePhaseListener: boolean,
+  target: EventTarget,
+): void {
+  let eventSystemFlags = IS_EVENT_HANDLE_NON_MANAGED_NODE;
   const listenerSet = getEventListenerSet(target);
   const listenerSetKey = getListenerSetKey(
     domEventName,
     isCapturePhaseListener,
   );
-  // If the listener entry is empty or we should upgrade, then
-  // we need to trap an event listener onto the target.
   if (!listenerSet.has(listenerSetKey)) {
     if (isCapturePhaseListener) {
       eventSystemFlags |= IS_CAPTURE_PHASE;
@@ -411,56 +377,36 @@ export function listenToNativeEvent(
   }
 }
 
-export function listenToReactEvent(
-  reactEvent: string,
-  rootContainerElement: Element,
-  targetElement: Element | null,
-): void {
-  if (!enableEagerRootListeners) {
-    const dependencies = registrationNameDependencies[reactEvent];
-    const dependenciesLength = dependencies.length;
-    // If the dependencies length is 1, that means we're not using a polyfill
-    // plugin like ChangeEventPlugin, BeforeInputPlugin, EnterLeavePlugin
-    // and SelectEventPlugin. We always use the native bubble event phase for
-    // these plugins and emulate two phase event dispatching. SimpleEventPlugin
-    // always only has a single dependency and SimpleEventPlugin events also
-    // use either the native capture event phase or bubble event phase, there
-    // is no emulation (except for focus/blur, but that will be removed soon).
-    const isPolyfillEventPlugin = dependenciesLength !== 1;
+const listeningMarker =
+  '_reactListening' +
+  Math.random()
+    .toString(36)
+    .slice(2);
 
-    if (isPolyfillEventPlugin) {
-      const listenerSet = getEventListenerSet(rootContainerElement);
-      // When eager listeners are off, this Set has a dual purpose: it both
-      // captures which native listeners we registered (e.g. "click__bubble")
-      // and *React* lazy listeners (e.g. "onClick") so we don't do extra checks.
-      // This second usage does not exist in the eager mode.
-      if (!listenerSet.has(reactEvent)) {
-        listenerSet.add(reactEvent);
-        for (let i = 0; i < dependenciesLength; i++) {
-          listenToNativeEvent(
-            dependencies[i],
-            false,
-            rootContainerElement,
-            targetElement,
-          );
+export function listenToAllSupportedEvents(rootContainerElement: EventTarget) {
+  if (!(rootContainerElement: any)[listeningMarker]) {
+    (rootContainerElement: any)[listeningMarker] = true;
+    allNativeEvents.forEach(domEventName => {
+      // We handle selectionchange separately because it
+      // doesn't bubble and needs to be on the document.
+      if (domEventName !== 'selectionchange') {
+        if (!nonDelegatedEvents.has(domEventName)) {
+          listenToNativeEvent(domEventName, false, rootContainerElement);
         }
+        listenToNativeEvent(domEventName, true, rootContainerElement);
       }
-    } else {
-      const isCapturePhaseListener =
-        reactEvent.substr(-7) === 'Capture' &&
-        // Edge case: onGotPointerCapture and onLostPointerCapture
-        // end with "Capture" but that's part of their event names.
-        // The Capture versions would end with CaptureCapture.
-        // So we have to check against that.
-        // This check works because none of the events we support
-        // end with "Pointer".
-        reactEvent.substr(-14, 7) !== 'Pointer';
-      listenToNativeEvent(
-        dependencies[0],
-        isCapturePhaseListener,
-        rootContainerElement,
-        targetElement,
-      );
+    });
+    const ownerDocument =
+      (rootContainerElement: any).nodeType === DOCUMENT_NODE
+        ? rootContainerElement
+        : (rootContainerElement: any).ownerDocument;
+    if (ownerDocument !== null) {
+      // The selectionchange event also needs deduplication
+      // but it is attached to the document.
+      if (!(ownerDocument: any)[listeningMarker]) {
+        (ownerDocument: any)[listeningMarker] = true;
+        listenToNativeEvent('selectionchange', false, ownerDocument);
+      }
     }
   }
 }
@@ -607,12 +553,13 @@ export function dispatchEventForPluginEventSystem(
     if (
       enableLegacyFBSupport &&
       // If our event flags match the required flags for entering
-      // FB legacy mode and we are prcocessing the "click" event,
+      // FB legacy mode and we are processing the "click" event,
       // then we can defer the event to the "document", to allow
       // for legacy FB support, where the expected behavior was to
       // match React < 16 behavior of delegated clicks to the doc.
       domEventName === 'click' &&
-      (eventSystemFlags & SHOULD_NOT_DEFER_CLICK_FOR_FB_SUPPORT_MODE) === 0
+      (eventSystemFlags & SHOULD_NOT_DEFER_CLICK_FOR_FB_SUPPORT_MODE) === 0 &&
+      !isReplayingEvent(nativeEvent)
     ) {
       deferClickToDocumentForLegacyFBSupport(domEventName, targetContainer);
       return;
@@ -686,7 +633,7 @@ export function dispatchEventForPluginEventSystem(
     }
   }
 
-  batchedEventUpdates(() =>
+  batchedUpdates(() =>
     dispatchEventsForPlugins(
       domEventName,
       eventSystemFlags,
@@ -715,10 +662,11 @@ export function accumulateSinglePhaseListeners(
   nativeEventType: string,
   inCapturePhase: boolean,
   accumulateTargetOnly: boolean,
+  nativeEvent: AnyNativeEvent,
 ): Array<DispatchListener> {
   const captureName = reactName !== null ? reactName + 'Capture' : null;
   const reactEventName = inCapturePhase ? captureName : reactName;
-  const listeners: Array<DispatchListener> = [];
+  let listeners: Array<DispatchListener> = [];
 
   let instance = targetFiber;
   let lastHostComponent = null;
@@ -796,6 +744,23 @@ export function accumulateSinglePhaseListeners(
     // listeners.
     if (accumulateTargetOnly) {
       break;
+    }
+    // If we are processing the onBeforeBlur event, then we need to take
+    // into consideration that part of the React tree might have been hidden
+    // or deleted (as we're invoking this event during commit). We can find
+    // this out by checking if intercept fiber set on the event matches the
+    // current instance fiber. In which case, we should clear all existing
+    // listeners.
+    if (enableCreateEventHandleAPI && nativeEvent.type === 'beforeblur') {
+      // $FlowFixMe: internal field
+      const detachedInterceptFiber = nativeEvent._detachedInterceptFiber;
+      if (
+        detachedInterceptFiber !== null &&
+        (detachedInterceptFiber === instance ||
+          detachedInterceptFiber === instance.alternate)
+      ) {
+        listeners = [];
+      }
     }
     instance = instance.return;
   }

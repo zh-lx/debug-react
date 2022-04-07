@@ -7,6 +7,7 @@
  * @flow
  */
 
+import type {ReactNodeList, OffscreenMode} from 'shared/ReactTypes';
 import type {ElementRef} from 'react';
 import type {
   HostComponent,
@@ -14,16 +15,19 @@ import type {
   MeasureLayoutOnSuccessCallback,
   MeasureOnSuccessCallback,
   NativeMethods,
-  ReactNativeBaseComponentViewConfig,
+  ViewConfig,
   TouchedViewDataAtPoint,
 } from './ReactNativeTypes';
 
 import {mountSafeCallback_NOT_REALLY_SAFE} from './NativeMethodsMixinUtils';
 import {create, diff} from './ReactNativeAttributePayload';
 
-import invariant from 'shared/invariant';
-
 import {dispatchEvent} from './ReactFabricEventEmitter';
+
+import {
+  DefaultEventPriority,
+  DiscreteEventPriority,
+} from 'react-reconciler/src/ReactEventPriorities';
 
 // Modules provided by RN:
 import {
@@ -46,6 +50,9 @@ const {
   measure: fabricMeasure,
   measureInWindow: fabricMeasureInWindow,
   measureLayout: fabricMeasureLayout,
+  unstable_DefaultEventPriority: FabricDefaultPriority,
+  unstable_DiscreteEventPriority: FabricDiscretePriority,
+  unstable_getCurrentEventPriority: fabricGetCurrentEventPriority,
 } = nativeFabricUIManager;
 
 const {get: getViewConfigForType} = ReactNativeViewConfigRegistry;
@@ -77,8 +84,6 @@ export type UpdatePayload = Object;
 export type TimeoutHandle = TimeoutID;
 export type NoTimeout = -1;
 
-export type OpaqueIDType = void;
-
 export type RendererInspectionConfig = $ReadOnly<{|
   // Deprecated. Replaced with getInspectorDataForViewAtPoint.
   getInspectorDataForViewTag?: (tag: number) => Object,
@@ -89,6 +94,28 @@ export type RendererInspectionConfig = $ReadOnly<{|
     callback: (viewData: TouchedViewDataAtPoint) => mixed,
   ) => void,
 |}>;
+
+// TODO?: find a better place for this type to live
+export type EventListenerOptions = $ReadOnly<{|
+  capture?: boolean,
+  once?: boolean,
+  passive?: boolean,
+  signal: mixed, // not yet implemented
+|}>;
+export type EventListenerRemoveOptions = $ReadOnly<{|
+  capture?: boolean,
+|}>;
+
+// TODO?: this will be changed in the future to be w3c-compatible and allow "EventListener" objects as well as functions.
+export type EventListener = Function;
+
+type InternalEventListeners = {
+  [string]: {|
+    listener: EventListener,
+    options: EventListenerOptions,
+    invalidated: boolean,
+  |}[],
+};
 
 // TODO: Remove this conditional once all changes have propagated.
 if (registerEventHandler) {
@@ -103,13 +130,14 @@ if (registerEventHandler) {
  */
 class ReactFabricHostComponent {
   _nativeTag: number;
-  viewConfig: ReactNativeBaseComponentViewConfig<>;
+  viewConfig: ViewConfig;
   currentProps: Props;
   _internalInstanceHandle: Object;
+  _eventListeners: ?InternalEventListeners;
 
   constructor(
     tag: number,
-    viewConfig: ReactNativeBaseComponentViewConfig<>,
+    viewConfig: ViewConfig,
     props: Props,
     internalInstanceHandle: Object,
   ) {
@@ -128,17 +156,23 @@ class ReactFabricHostComponent {
   }
 
   measure(callback: MeasureOnSuccessCallback) {
-    fabricMeasure(
-      this._internalInstanceHandle.stateNode.node,
-      mountSafeCallback_NOT_REALLY_SAFE(this, callback),
-    );
+    const {stateNode} = this._internalInstanceHandle;
+    if (stateNode != null) {
+      fabricMeasure(
+        stateNode.node,
+        mountSafeCallback_NOT_REALLY_SAFE(this, callback),
+      );
+    }
   }
 
   measureInWindow(callback: MeasureInWindowOnSuccessCallback) {
-    fabricMeasureInWindow(
-      this._internalInstanceHandle.stateNode.node,
-      mountSafeCallback_NOT_REALLY_SAFE(this, callback),
-    );
+    const {stateNode} = this._internalInstanceHandle;
+    if (stateNode != null) {
+      fabricMeasureInWindow(
+        stateNode.node,
+        mountSafeCallback_NOT_REALLY_SAFE(this, callback),
+      );
+    }
   }
 
   measureLayout(
@@ -159,12 +193,18 @@ class ReactFabricHostComponent {
       return;
     }
 
-    fabricMeasureLayout(
-      this._internalInstanceHandle.stateNode.node,
-      relativeToNativeNode._internalInstanceHandle.stateNode.node,
-      mountSafeCallback_NOT_REALLY_SAFE(this, onFail),
-      mountSafeCallback_NOT_REALLY_SAFE(this, onSuccess),
-    );
+    const toStateNode = this._internalInstanceHandle.stateNode;
+    const fromStateNode =
+      relativeToNativeNode._internalInstanceHandle.stateNode;
+
+    if (toStateNode != null && fromStateNode != null) {
+      fabricMeasureLayout(
+        toStateNode.node,
+        fromStateNode.node,
+        mountSafeCallback_NOT_REALLY_SAFE(this, onFail),
+        mountSafeCallback_NOT_REALLY_SAFE(this, onSuccess),
+      );
+    }
   }
 
   setNativeProps(nativeProps: Object) {
@@ -176,15 +216,112 @@ class ReactFabricHostComponent {
 
     return;
   }
+
+  // This API (addEventListener, removeEventListener) attempts to adhere to the
+  // w3 Level2 Events spec as much as possible, treating HostComponent as a DOM node.
+  //
+  // Unless otherwise noted, these methods should "just work" and adhere to the W3 specs.
+  // If they deviate in a way that is not explicitly noted here, you've found a bug!
+  //
+  // See:
+  // * https://www.w3.org/TR/DOM-Level-2-Events/events.html
+  // * https://developer.mozilla.org/en-US/docs/Web/API/EventTarget/addEventListener
+  // * https://developer.mozilla.org/en-US/docs/Web/API/EventTarget/removeEventListener
+  //
+  // And notably, not implemented (yet?):
+  // * https://developer.mozilla.org/en-US/docs/Web/API/EventTarget/dispatchEvent
+  //
+  //
+  // Deviations from spec/TODOs:
+  // (1) listener must currently be a function, we do not support EventListener objects yet.
+  // (2) we do not support the `signal` option / AbortSignal yet
+  addEventListener_unstable(
+    eventType: string,
+    listener: EventListener,
+    options: EventListenerOptions | boolean,
+  ) {
+    if (typeof eventType !== 'string') {
+      throw new Error('addEventListener_unstable eventType must be a string');
+    }
+    if (typeof listener !== 'function') {
+      throw new Error('addEventListener_unstable listener must be a function');
+    }
+
+    // The third argument is either boolean indicating "captures" or an object.
+    const optionsObj =
+      typeof options === 'object' && options !== null ? options : {};
+    const capture =
+      (typeof options === 'boolean' ? options : optionsObj.capture) || false;
+    const once = optionsObj.once || false;
+    const passive = optionsObj.passive || false;
+    const signal = null; // TODO: implement signal/AbortSignal
+
+    const eventListeners: InternalEventListeners = this._eventListeners || {};
+    if (this._eventListeners == null) {
+      this._eventListeners = eventListeners;
+    }
+
+    const namedEventListeners = eventListeners[eventType] || [];
+    if (eventListeners[eventType] == null) {
+      eventListeners[eventType] = namedEventListeners;
+    }
+
+    namedEventListeners.push({
+      listener: listener,
+      invalidated: false,
+      options: {
+        capture: capture,
+        once: once,
+        passive: passive,
+        signal: signal,
+      },
+    });
+  }
+
+  // See https://developer.mozilla.org/en-US/docs/Web/API/EventTarget/removeEventListener
+  removeEventListener_unstable(
+    eventType: string,
+    listener: EventListener,
+    options: EventListenerRemoveOptions | boolean,
+  ) {
+    // eventType and listener must be referentially equal to be removed from the listeners
+    // data structure, but in "options" we only check the `capture` flag, according to spec.
+    // That means if you add the same function as a listener with capture set to true and false,
+    // you must also call removeEventListener twice with capture set to true/false.
+    const optionsObj =
+      typeof options === 'object' && options !== null ? options : {};
+    const capture =
+      (typeof options === 'boolean' ? options : optionsObj.capture) || false;
+
+    // If there are no event listeners or named event listeners, we can bail early - our
+    // job is already done.
+    const eventListeners = this._eventListeners;
+    if (!eventListeners) {
+      return;
+    }
+    const namedEventListeners = eventListeners[eventType];
+    if (!namedEventListeners) {
+      return;
+    }
+
+    // TODO: optimize this path to make remove cheaper
+    eventListeners[eventType] = namedEventListeners.filter(listenerObj => {
+      return !(
+        listenerObj.listener === listener &&
+        listenerObj.options.capture === capture
+      );
+    });
+  }
 }
 
 // eslint-disable-next-line no-unused-expressions
-(ReactFabricHostComponent.prototype: NativeMethods);
+(ReactFabricHostComponent.prototype: $ReadOnly<{...NativeMethods, ...}>);
 
 export * from 'react-reconciler/src/ReactFiberHostConfigWithNoMutation';
 export * from 'react-reconciler/src/ReactFiberHostConfigWithNoHydration';
 export * from 'react-reconciler/src/ReactFiberHostConfigWithNoScopes';
 export * from 'react-reconciler/src/ReactFiberHostConfigWithNoTestSelectors';
+export * from 'react-reconciler/src/ReactFiberHostConfigWithNoMicrotasks';
 
 export function appendInitialChild(
   parentInstance: Instance,
@@ -242,10 +379,11 @@ export function createTextInstance(
   hostContext: HostContext,
   internalInstanceHandle: Object,
 ): TextInstance {
-  invariant(
-    hostContext.isInAParentText,
-    'Text strings must be rendered within a <Text> component.',
-  );
+  if (__DEV__) {
+    if (!hostContext.isInAParentText) {
+      console.error('Text strings must be rendered within a <Text> component.');
+    }
+  }
 
   const tag = nextReactTag;
   nextReactTag += 2;
@@ -291,6 +429,9 @@ export function getChildHostContext(
     type === 'RCTSinglelineTextInputView' || // iOS
     type === 'RCTText' ||
     type === 'RCTVirtualText';
+
+  // TODO: If this is an offscreen host container, we should reuse the
+  // parent context.
 
   if (prevIsInAParentText !== isInAParentText) {
     return {isInAParentText};
@@ -339,6 +480,24 @@ export function shouldSetTextContent(type: string, props: Props): boolean {
   return false;
 }
 
+export function getCurrentEventPriority(): * {
+  const currentEventPriority = fabricGetCurrentEventPriority
+    ? fabricGetCurrentEventPriority()
+    : null;
+
+  if (currentEventPriority != null) {
+    switch (currentEventPriority) {
+      case FabricDiscretePriority:
+        return DiscreteEventPriority;
+      case FabricDefaultPriority:
+      default:
+        return DefaultEventPriority;
+    }
+  }
+
+  return DefaultEventPriority;
+}
+
 // The Fabric renderer is secondary to the existing React Native renderer.
 export const isPrimaryRenderer = false;
 
@@ -384,6 +543,37 @@ export function cloneInstance(
     node: clone,
     canonical: instance.canonical,
   };
+}
+
+// TODO: These two methods should be replaced with `createOffscreenInstance` and
+// `cloneOffscreenInstance`. I did it this way for now because the offscreen
+// instance is stored on an extra HostComponent fiber instead of the
+// OffscreenComponent fiber, and I didn't want to add an extra check to the
+// generic HostComponent path. Instead we should use the OffscreenComponent
+// fiber, but currently Fabric expects a 1:1 correspondence between Fabric
+// instances and host fibers, so I'm leaving this optimization for later once
+// we can confirm this won't break any downstream expectations.
+export function getOffscreenContainerType(): string {
+  return 'RCTView';
+}
+
+export function getOffscreenContainerProps(
+  mode: OffscreenMode,
+  children: ReactNodeList,
+): Props {
+  if (mode === 'hidden') {
+    return {
+      children,
+      style: {display: 'none'},
+    };
+  } else {
+    return {
+      children,
+      style: {
+        flex: 1,
+      },
+    };
+  }
 }
 
 export function cloneHiddenInstance(
@@ -435,53 +625,11 @@ export function replaceContainerChildren(
   newChildren: ChildSet,
 ): void {}
 
-export function getFundamentalComponentInstance(fundamentalInstance: any) {
-  throw new Error('Not yet implemented.');
-}
-
-export function mountFundamentalComponent(fundamentalInstance: any) {
-  throw new Error('Not yet implemented.');
-}
-
-export function shouldUpdateFundamentalComponent(fundamentalInstance: any) {
-  throw new Error('Not yet implemented.');
-}
-
-export function updateFundamentalComponent(fundamentalInstance: any) {
-  throw new Error('Not yet implemented.');
-}
-
-export function unmountFundamentalComponent(fundamentalInstance: any) {
-  throw new Error('Not yet implemented.');
-}
-
-export function cloneFundamentalInstance(fundamentalInstance: any) {
-  throw new Error('Not yet implemented.');
-}
-
 export function getInstanceFromNode(node: any) {
   throw new Error('Not yet implemented.');
 }
 
-export function isOpaqueHydratingObject(value: mixed): boolean {
-  throw new Error('Not yet implemented');
-}
-
-export function makeOpaqueHydratingObject(
-  attemptToReadValue: () => void,
-): OpaqueIDType {
-  throw new Error('Not yet implemented.');
-}
-
-export function makeClientId(): OpaqueIDType {
-  throw new Error('Not yet implemented');
-}
-
-export function makeClientIdInDEV(warnOnAccessInDEV: () => void): OpaqueIDType {
-  throw new Error('Not yet implemented');
-}
-
-export function beforeActiveInstanceBlur() {
+export function beforeActiveInstanceBlur(internalInstanceHandle: Object) {
   // noop
 }
 
@@ -490,5 +638,9 @@ export function afterActiveInstanceBlur() {
 }
 
 export function preparePortalMount(portalInstance: Instance): void {
+  // noop
+}
+
+export function detachDeletedInstance(node: Instance): void {
   // noop
 }

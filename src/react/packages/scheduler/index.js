@@ -8,3 +8,8 @@
 'use strict';
 
 export * from './src/forks/Scheduler';
+
+export {
+  unstable_yieldValue,
+  unstable_setDisableYieldValue
+} from './src/forks/SchedulerMock';

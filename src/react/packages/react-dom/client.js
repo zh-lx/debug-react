@@ -22,6 +22,8 @@ import {
   __SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED as Internals,
 } from './';
 
+console.log(111)
+
 export function createRoot(
   container: Element | DocumentFragment,
   options?: CreateRootOptions,

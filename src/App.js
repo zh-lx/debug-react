@@ -1,17 +1,56 @@
-import { useState } from 'react';
+import React, { Component } from 'react';
 
-export default function App() {
-  const [count, setCount] = useState(0);
-  return (
-    <div>
-      <p>{count}</p>
-      <input
-        type="button"
-        value="增加"
-        onClick={() => {
-          setCount(count + 1);
-        }}
-      />
-    </div>
-  );
+class AutomaticBatching extends Component {
+  state: { count: number };
+  constructor(props) {
+    super(props);
+    this.state = {
+      count: 0,
+    };
+  }
+  handleClickButton = () => {
+    // this.setState({
+    //   count: this.state.count + 1,
+    // });
+    // console.log(this.state.count);
+    // this.setState({
+    //   count: this.state.count + 1,
+    // });
+    // console.log(this.state.count);
+    // setTimeout(() => {
+    //   this.setState({
+    //     count: this.state.count + 1,
+    //   });
+    //   console.log(this.state.count);
+    //   this.setState({
+    //     count: this.state.count + 1,
+    //   });
+    //   console.log(this.state.count);
+    // });
+
+    this.setState({
+      count: this.state.count + 1,
+    });
+    console.log(this.state.count);
+    console.log(222);
+
+    Promise.resolve().then(() => {
+      this.setState({
+        count: this.state.count + 1,
+      });
+      console.log(this.state.count);
+      console.log(111);
+    });
+    
+  };
+  render() {
+    return (
+      <div>
+        <p>{this.state.count}</p>
+        <button onClick={this.handleClickButton}>增加</button>
+      </div>
+    );
+  }
 }
+
+export default AutomaticBatching;

@@ -318,6 +318,7 @@ module.exports = function (webpackEnv) {
           'scheduler/tracing': 'scheduler/tracing-profiling',
         }),
         ...(modules.webpackAliases || {}),
+        scheduler: path.resolve(__dirname, '../src/react/packages/scheduler'),
         react: path.resolve(__dirname, '../src/react/packages/react'),
         'react-dom': path.resolve(__dirname, '../src/react/packages/react-dom'),
         shared: path.resolve(__dirname, '../src/react/packages/shared'),

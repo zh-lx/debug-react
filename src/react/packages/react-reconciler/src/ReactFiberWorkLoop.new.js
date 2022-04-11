@@ -549,6 +549,7 @@ export function scheduleUpdateOnFiber(
         addFiberToLanesMap(root, fiber, lane);
       }
     }
+    console.log('warn if new')
 
     warnIfUpdatesNotWrappedWithActDEV(fiber);
 

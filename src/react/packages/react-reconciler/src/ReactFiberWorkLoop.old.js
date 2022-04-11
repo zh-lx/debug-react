@@ -550,6 +550,9 @@ export function scheduleUpdateOnFiber(
       }
     }
 
+    console.log('warn if old')
+
+
     warnIfUpdatesNotWrappedWithActDEV(fiber);
 
     if (enableProfilerTimer && enableProfilerNestedUpdateScheduledHook) {
@@ -727,6 +730,7 @@ function ensureRootIsScheduled(root: FiberRoot, currentTime: number) {
   // expired so we know to work on those next.
   markStarvedLanesAsExpired(root, currentTime);
 
+  console.log('scheduler')
   // Determine the next lanes to work on, and their priority.
   const nextLanes = getNextLanes(
     root,
@@ -734,6 +738,7 @@ function ensureRootIsScheduled(root: FiberRoot, currentTime: number) {
   );
 
   if (nextLanes === NoLanes) {
+    console.log('scheduler', 1)
     // Special case: There's nothing to work on.
     if (existingCallbackNode !== null) {
       cancelCallback(existingCallbackNode);
@@ -759,6 +764,7 @@ function ensureRootIsScheduled(root: FiberRoot, currentTime: number) {
       existingCallbackNode !== fakeActCallbackNode
     )
   ) {
+
     if (__DEV__) {
       // If we're going to re-use an existing task, it needs to exist.
       // Assume that discrete update microtasks are non-cancellable and null.
@@ -786,23 +792,30 @@ function ensureRootIsScheduled(root: FiberRoot, currentTime: number) {
   if (newCallbackPriority === SyncLane) {
     // Special case: Sync React callbacks are scheduled on a special
     // internal queue
+    console.log('scheduler', 2)
     if (root.tag === LegacyRoot) {
       if (__DEV__ && ReactCurrentActQueue.isBatchingLegacy !== null) {
         ReactCurrentActQueue.didScheduleLegacyUpdate = true;
       }
+      console.log('scheduler', '------leg')
       scheduleLegacySyncCallback(performSyncWorkOnRoot.bind(null, root));
     } else {
+      console.log('scheduler', '------con')
       scheduleSyncCallback(performSyncWorkOnRoot.bind(null, root));
     }
     if (supportsMicrotasks) {
+      console.log(supportsMicrotasks, '----')
       // Flush the queue in a microtask.
       if (__DEV__ && ReactCurrentActQueue.current !== null) {
         // Inside `act`, use our internal `act` queue so that these get flushed
         // at the end of the current scope even when using the sync version
         // of `act`.
+        console.log('scheduler', 3)
         ReactCurrentActQueue.current.push(flushSyncCallbacks);
       } else {
+        console.log('----',1,queueMicrotask)
         scheduleMicrotask(() => {
+          console.log('scheduler',4)
           // In Safari, appending an iframe forces microtasks to run.
           // https://github.com/facebook/react/issues/22459
           // We don't support running callbacks in the middle of render
@@ -815,6 +828,7 @@ function ensureRootIsScheduled(root: FiberRoot, currentTime: number) {
         });
       }
     } else {
+      console.log('scheduler', 5)
       // Flush the queue in an Immediate task.
       scheduleCallback(ImmediateSchedulerPriority, flushSyncCallbacks);
     }

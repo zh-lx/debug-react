@@ -247,6 +247,7 @@ export function enqueueUpdate<State>(
     }
     sharedQueue.pending = update;
   }
+  console.log(updateQueue)
 
   if (__DEV__) {
     if (
